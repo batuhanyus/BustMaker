@@ -101,6 +101,7 @@ def generate(
     try:
         input_path = _resolve_input(files, folder_path)
     except ValueError as exc:
+        progress(0.0, desc=f"ERROR: {exc}")
         yield (f"ERROR: {exc}", None, None, None, None, None, None, None)
         return
 
@@ -108,6 +109,11 @@ def generate(
     job = JobPaths.create(cfg, input_path)
     hub = ProgressHub()
     result: dict[str, Any] = {}
+
+    # Drive the native Gradio progress bar from streamed pipeline events.
+    # Events without a fraction (phase messages) hold the bar where it is.
+    last_fraction = 0.0
+    progress(last_fraction, desc="starting...")
 
     def _worker() -> None:
         try:
@@ -121,21 +127,35 @@ def generate(
     thread = threading.Thread(target=_worker, daemon=True)
     thread.start()
 
+    def _render(ev: dict) -> None:
+        nonlocal last_fraction, last_stage
+        if ev.get("progress") is not None:
+            if ev["stage"] != last_stage:
+                # new stage: restart its bar from zero, then never go backward
+                last_stage = ev["stage"]
+                last_fraction = 0.0
+            last_fraction = max(last_fraction, ev["progress"])
+        progress(last_fraction, desc=f"{ev['stage']} | {ev['message'] or ev['status']}")
+
     seen = 0
     last_event = "starting..."
+    last_stage = ""
     while thread.is_alive():
         events = hub.events()
         for ev in events[seen:]:
             line = _fmt_event(ev)
             last_event = line
+            _render(ev)
             yield (line, None, None, None, None, None, None, None)
         seen = len(events)
         time.sleep(0.25)
     thread.join()
     for ev in hub.events()[seen:]:
+        _render(ev)
         yield (_fmt_event(ev), None, None, None, None, None, None, None)
 
     if "error" in result:
+        progress(last_fraction, desc=f"ERROR: {result['error']}")
         yield (f"ERROR: {result['error']}", None, None, None, None, None, None, None)
         return
 
@@ -145,6 +165,7 @@ def generate(
     debug_zip = _make_debug_zip(job)
     ok = bool(result.get("report") and result["report"].summary.get("success"))
     summary = f"{'DONE' if ok else 'FINISHED WITH WARNINGS'} — outputs in {job.job_dir}"
+    progress(1.0, desc=summary)
     yield (f"{last_event}\n{summary}", stl, glb, report, debug_zip, glb, stl, _stats_summary(report))
 
 

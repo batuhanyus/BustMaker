@@ -13,13 +13,45 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Optional
 
 from core.config import Config
-from core.logging import get_logger, setup_logging
+from core.logging import ProgressHub, get_logger, setup_logging
 from core.paths import JobPaths
 from core.pipeline import MODES, classify_input, run_pipeline
 
 log = get_logger("cli")
+
+
+class _TqdmProgressHub(ProgressHub):
+    """ProgressHub that also paints a tqdm bar in the terminal (CLI only)."""
+
+    def __init__(self, log_path: Optional[Path] = None):
+        from tqdm import tqdm  # noqa: PLC0415 - keep tqdm out of core imports
+
+        super().__init__(log_path=log_path)
+        self._bar = tqdm(total=100, unit="%", desc="pipeline", leave=True)
+        self._last_stage = ""
+
+    def emit(
+        self,
+        stage: str,
+        status: str,
+        message: str = "",
+        progress: Optional[float] = None,
+    ) -> None:
+        super().emit(stage, status, message, progress)
+        self._bar.set_description(f"{stage} | {message or status}")
+        if progress is not None:
+            if stage != self._last_stage:
+                # new stage: restart its bar from zero, then never go backward
+                self._last_stage = stage
+                self._bar.n = 0
+            self._bar.n = max(self._bar.n, int(progress * 100))
+            self._bar.refresh()
+
+    def close(self) -> None:
+        self._bar.close()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -60,13 +92,18 @@ def main(argv: list[str] | None = None) -> int:
     log.info("Job %s | input=%s (%s) | mode=%s | preset=%s", job.job_id, input_path, itype, args.mode, args.preset)
     log.info("Output dir: %s", job.job_dir)
 
-    report = run_pipeline(
-        cfg,
-        job,
-        mode=args.mode,
-        preset=args.preset,
-        cli={"debug": args.debug, "resume": args.resume},
-    )
+    hub = _TqdmProgressHub(log_path=job.log_path.with_suffix(".events.jsonl"))
+    try:
+        report = run_pipeline(
+            cfg,
+            job,
+            mode=args.mode,
+            preset=args.preset,
+            cli={"debug": args.debug, "resume": args.resume},
+            progress=hub,
+        )
+    finally:
+        hub.close()
     ok = report.summary.get("success", False)
     log.info("Pipeline finished: success=%s | report=%s", ok, job.report_path)
     return 0 if ok else 1

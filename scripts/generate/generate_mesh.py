@@ -72,7 +72,7 @@ def run_generate(ctx: RunContext) -> StageResult:
             backends = _generative_backends(ctx) if strategy == "generative" else []
         for backend_name in backends:
             ctx.progress.emit("generate_mesh", "progress",
-                              f"trying backend '{backend_name}'", 0.2)
+                              f"trying backend '{backend_name}'", 0.0)
             backend = _backend_for(backend_name, ctx.cfg)
             if not backend.available():
                 log.info("backend '%s' unavailable, skipping", backend_name)
