@@ -192,6 +192,16 @@ def _exif_normalize_copy(src: Path, dst: Path) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     with Image.open(src) as img:
         img = ImageOps.exif_transpose(img)
+        if img.mode in ("RGBA", "LA", "PA") or (
+            img.mode == "P" and "transparency" in img.info
+        ):
+            # JPEG cannot store alpha: composite onto a white background.
+            rgba = img.convert("RGBA")
+            bg = Image.new("RGB", rgba.size, (255, 255, 255))
+            bg.paste(rgba, mask=rgba.split()[3])
+            img = bg
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
         img.save(dst, quality=95)  # re-encode; orientation baked in
 
 
