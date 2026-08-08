@@ -5,13 +5,15 @@
 Thin wrapper over the same pipeline the CLI runs: upload a video / photos /
 single image (or type a local folder path), pick mode + quality preset, click
 Generate, watch live progress, download bust.stl / preview.glb / report.json
-(+ debug zip when requested).
+(+ debug zip when requested), and inspect the result in the interactive
+3D review panel (orbit / zoom / pan over the textured GLB and the print STL).
 
 Security: bound to 127.0.0.1, share disabled, no telemetry.
 """
 
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 import threading
@@ -54,6 +56,30 @@ def _fmt_event(ev: dict) -> str:
     return f"{ts} | {ev['stage']:14s} | {ev['status']:8s}{prog} | {ev.get('message', '')}"
 
 
+def _stats_summary(report_path: Optional[str]) -> Optional[str]:
+    """One-line printability summary pulled from the job's report.json."""
+    if not report_path:
+        return None
+    try:
+        report = json.loads(Path(report_path).read_text(encoding="utf-8"))
+        stats = (report.get("mesh") or {}).get("stats") or {}
+    except (OSError, ValueError):
+        return None
+    if not stats:
+        return None
+    parts = []
+    if stats.get("triangles"):
+        parts.append(f"{stats['triangles']:,} triangles")
+    if stats.get("vertices"):
+        parts.append(f"{stats['vertices']:,} vertices")
+    bounds = stats.get("bounds_mm")
+    if isinstance(bounds, list) and len(bounds) == 3:
+        parts.append(f"size {bounds[0]:g} \u00d7 {bounds[1]:g} \u00d7 {bounds[2]:g} mm")
+    parts.append("watertight" if stats.get("watertight") else "NOT watertight")
+    parts.append("flat base" if stats.get("base_flat") else "base not flat")
+    return " \u00b7 ".join(parts)
+
+
 def _make_debug_zip(job: JobPaths) -> Optional[str]:
     if not job.debug_dir.is_dir() or not any(job.debug_dir.rglob("*")):
         return None
@@ -75,7 +101,7 @@ def generate(
     try:
         input_path = _resolve_input(files, folder_path)
     except ValueError as exc:
-        yield (f"ERROR: {exc}", None, None, None, None)
+        yield (f"ERROR: {exc}", None, None, None, None, None, None, None)
         return
 
     cfg = Config.load()
@@ -102,15 +128,15 @@ def generate(
         for ev in events[seen:]:
             line = _fmt_event(ev)
             last_event = line
-            yield (line, None, None, None, None)
+            yield (line, None, None, None, None, None, None, None)
         seen = len(events)
         time.sleep(0.25)
     thread.join()
     for ev in hub.events()[seen:]:
-        yield (_fmt_event(ev), None, None, None, None)
+        yield (_fmt_event(ev), None, None, None, None, None, None, None)
 
     if "error" in result:
-        yield (f"ERROR: {result['error']}", None, None, None, None)
+        yield (f"ERROR: {result['error']}", None, None, None, None, None, None, None)
         return
 
     stl = str(job.stl_path) if job.stl_path.is_file() else None
@@ -119,7 +145,7 @@ def generate(
     debug_zip = _make_debug_zip(job)
     ok = bool(result.get("report") and result["report"].summary.get("success"))
     summary = f"{'DONE' if ok else 'FINISHED WITH WARNINGS'} — outputs in {job.job_dir}"
-    yield (f"{last_event}\n{summary}", stl, glb, report, debug_zip)
+    yield (f"{last_event}\n{summary}", stl, glb, report, debug_zip, glb, stl, _stats_summary(report))
 
 
 def build_app() -> gr.Blocks:
@@ -151,10 +177,21 @@ def build_app() -> gr.Blocks:
             report_out = gr.File(label="report.json")
             debug_out = gr.File(label="debug.zip (keyframes/masks)")
 
+        gr.Markdown("### 🧊 3D review — drag to orbit, scroll to zoom, right-drag to pan")
+        with gr.Row():
+            review_glb = gr.Model3D(
+                label="preview.glb — textured preview", interactive=False, height=480
+            )
+            review_stl = gr.Model3D(
+                label="bust.stl — print mesh", interactive=False, height=480
+            )
+        review_stats = gr.Markdown("")
+
         btn.click(
             generate,
             inputs=[files, folder, mode, preset],
-            outputs=[log, stl_out, glb_out, report_out, debug_out],
+            outputs=[log, stl_out, glb_out, report_out, debug_out,
+                     review_glb, review_stl, review_stats],
         )
     return demo
 
