@@ -115,6 +115,11 @@ def stage_print_prep(ctx: RunContext) -> StageResult:
     final_dir = ctx.job.final_dir
     final_dir.mkdir(parents=True, exist_ok=True)
 
+    # Detail-preserving repair: clean raw meshes (Hunyuan3D, poisson) skip
+    # the voxel remesh; genuinely broken meshes still get it as a repair.
+    needs_repair = _mesh_needs_repair(raw)
+    log.info("print_prep: raw mesh needs_repair=%s", needs_repair)
+
     stats_json = ctx.job.temp_dir / "mesh_stats.json"
     run_blender_script(
         ctx.cfg,
@@ -126,6 +131,9 @@ def stage_print_prep(ctx: RunContext) -> StageResult:
             "--base-thickness", str(print_cfg.get("base_thickness_mm", 4.0)),
             "--voxel-size", str(preset["voxel_size_mm"]),
             "--decimate-ratio", str(preset["decimate_ratio"]),
+            "--input-watertight", "false" if needs_repair else "true",
+            "--min-triangles", str(preset.get("min_triangles", 25_000)),
+            "--max-triangles", str(preset.get("max_triangles", 2_000_000)),
         ],
         timeout=900,
     )
@@ -167,9 +175,46 @@ def stage_print_prep(ctx: RunContext) -> StageResult:
             "stl": str(stl),
             "glb": str(glb) if glb.is_file() else None,
             "stats": stats,
+            "input_watertight": not needs_repair,
             "target_height_mm": print_cfg.get("target_height_mm", 120.0),
         },
     )
+
+
+def _mesh_needs_repair(path: Path) -> bool:
+    """Decide whether the raw mesh needs the lossy voxel-remesh repair.
+
+    Strict watertightness is too harsh: generative outputs often carry a
+    handful of non-manifold edges or a tiny floater while being 99.99%
+    clean, and remeshing those erases facial detail. Only genuinely broken
+    meshes (large holes, many bad edges, or a dominant floater fraction)
+    get the remesh. Fail-safe: any load/check error reports needs-repair.
+    """
+    try:
+        import trimesh
+        from collections import Counter
+
+        mesh = trimesh.load(path, force="mesh")
+        if mesh.is_watertight:
+            return False
+        counts = Counter(map(tuple, mesh.edges_sorted.tolist()))
+        boundary = sum(1 for n in counts.values() if n == 1)
+        nonmanifold = sum(1 for n in counts.values() if n > 2)
+        try:
+            parts = mesh.split(only_watertight=False)
+            largest = max((len(p.faces) for p in parts), default=0)
+            total = len(mesh.faces)
+            floater_fraction = 1.0 - (largest / total) if total else 1.0
+        except Exception:  # noqa: BLE001 - split can fail on weird meshes
+            floater_fraction = 0.0
+        needs = boundary > 200 or nonmanifold > 20 or floater_fraction > 0.05
+        log.info("print_prep: mesh defects boundary=%d nonmanifold=%d "
+                 "floaters=%.1f%% -> needs_repair=%s",
+                 boundary, nonmanifold, floater_fraction * 100, needs)
+        return needs
+    except Exception as exc:  # noqa: BLE001 - never block prep on the check
+        log.warning("repair check failed (%s); assuming broken mesh", exc)
+        return True
 
 
 def stage_validate(ctx: RunContext) -> StageResult:

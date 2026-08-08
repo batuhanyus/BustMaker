@@ -54,8 +54,13 @@ def main() -> int:
     volume = bm.calc_volume(signed=False)
     z_min = min(v.co.z for v in bm.verts)
     eps = 0.1
+    total = max(len(bm.verts), 1)
     on_base = sum(1 for v in bm.verts if abs(v.co.z - z_min) <= eps)
-    base_flat = on_base / max(len(bm.verts), 1) > 0.005
+    # A real flat base has a rim of vertices on the lowest plane. The old
+    # fixed 0.5% ratio failed on detailed busts (the rim is a shrinking
+    # fraction as vertex count grows): require an absolute rim (>= 4 verts,
+    # excludes a sphere's single contact point) plus a small ratio.
+    base_flat = on_base >= 4 and on_base / total > 0.001
     bm.free()
 
     # world-space bounds in mm (scene unit == mm)

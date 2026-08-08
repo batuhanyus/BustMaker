@@ -57,6 +57,12 @@ def is_available(cfg: Config, backend_name: str) -> bool:
 
     if backend_name == "triposr":
         return (models_dir / "triposr" / "model.ckpt").is_file()
+    if backend_name == "hunyuan3d":
+        return any(
+            (models_dir / "hunyuan3d" / name / "model.fp16.ckpt").is_file()
+            and (models_dir / "hunyuan3d" / name / "config.yaml").is_file()
+            for name in ("dit-v2-1", "hunyuan3d-dit-v2-1")
+        )
     if backend_name == "stable_fast_3d":
         return (models_dir / "stable_fast_3d" / "model.safetensors").is_file()
     if backend_name == "depth_relief":

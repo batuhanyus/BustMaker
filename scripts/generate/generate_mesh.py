@@ -7,7 +7,9 @@ raises a StageError so the report shows a failed stage — never a silent gap.
 
 Chain mapping (mode strategies -> backends):
     capture    -> [colmap]
-    generative -> [triposr, stable_fast_3d]
+    generative -> per-preset ``generative_backends`` from config.yaml
+                  (balanced/high: hunyuan3d -> stable_fast_3d -> triposr;
+                  fast: triposr -> stable_fast_3d)
     depth_relief -> [depth_relief]
 """
 
@@ -23,12 +25,23 @@ log = get_logger("generate")
 
 STRATEGY_BACKENDS = {
     "capture": ["colmap"],
-    "generative": ["triposr", "stable_fast_3d"],
+    "generative": None,  # resolved per preset (see _generative_backends)
     "depth_relief": ["depth_relief"],
 }
 
 
+def _generative_backends(ctx: RunContext) -> list[str]:
+    preset = ctx.cfg.preset(ctx.preset)
+    backends = preset.get("generative_backends")
+    if backends:
+        return [str(b) for b in backends]
+    return ["triposr", "stable_fast_3d"]
+
+
 def _backend_for(name: str, cfg):
+    if name == "hunyuan3d":
+        from adapters.generative.hunyuan3d_adapter import Hunyuan3DBackend
+        return Hunyuan3DBackend(cfg)
     if name == "triposr":
         from adapters.generative.triposr_adapter import TripoSRBackend
         return TripoSRBackend(cfg)
@@ -54,7 +67,10 @@ def run_generate(ctx: RunContext) -> StageResult:
     out_path = ctx.job.raw_obj_path
 
     for strategy in chain:
-        for backend_name in STRATEGY_BACKENDS.get(strategy, []):
+        backends = STRATEGY_BACKENDS.get(strategy)
+        if backends is None:
+            backends = _generative_backends(ctx) if strategy == "generative" else []
+        for backend_name in backends:
             ctx.progress.emit("generate_mesh", "progress",
                               f"trying backend '{backend_name}'", 0.2)
             backend = _backend_for(backend_name, ctx.cfg)

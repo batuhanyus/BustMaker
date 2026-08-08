@@ -8,8 +8,11 @@ runs fully offline):
     TripoSR weights + config            -> models/triposr/
     DINOv2 config for TripoSR tokenizer -> models/triposr_dino/
     Stable Fast 3D weights + config     -> models/stable_fast_3d/
+    Hunyuan3D-2.1 DiT + VAE weights     -> models/hunyuan3d/ (dit-v2-1, vae-v2-1)
+    Hunyuan3D-2mv multi-view DiT       -> models/hunyuan3d-mv/ (optional: multi-view input)
     Depth Anything V2 (small) weights   -> models/depth_anything_v2/
     rembg u2net ONNX model              -> models/rembg/
+    mediapipe FaceLandmarker model      -> models/mediapipe/face_landmarker.task
 
 Usage::
 
@@ -120,6 +123,12 @@ HF_ENTRIES: list[HfEntry] = [
 
 URL_ENTRIES: list[UrlEntry] = [
     UrlEntry("rembg_u2net", REMBG_U2NET_URL, "models/rembg/u2net.onnx", "rembg u2net background-removal model"),
+    UrlEntry(
+        "mediapipe_face_landmarker",
+        "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+        "models/mediapipe/face_landmarker.task",
+        "mediapipe FaceLandmarker (head-yaw estimation for multi-view selection)",
+    ),
 ]
 
 # Files that must exist after a successful fetch (for --check)
@@ -129,9 +138,11 @@ CHECK_FILES: dict[str, Path] = {
     "triposr_code": PROJECT_ROOT / "vendor/triposr/tsr/system.py",
     "triposr": PROJECT_ROOT / "models/triposr/model.ckpt",
     "triposr_dino": PROJECT_ROOT / "models/triposr_dino/config.json",
+    "hunyuan3d": PROJECT_ROOT / "models/hunyuan3d/dit-v2-1/model.fp16.ckpt",
     "stable_fast_3d": PROJECT_ROOT / "models/stable_fast_3d/model.safetensors",
     "depth_anything_v2": PROJECT_ROOT / "models/depth_anything_v2/model.safetensors",
     "rembg_u2net": PROJECT_ROOT / "models/rembg/u2net.onnx",
+    "mediapipe_face_landmarker": PROJECT_ROOT / "models/mediapipe/face_landmarker.task",
 }
 
 
@@ -272,6 +283,131 @@ def fetch_hf(entry: HfEntry, force: bool) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Hunyuan3D-2.1 (manual-download friendly)
+# ---------------------------------------------------------------------------
+
+# Official repo subfolders -> canonical local layout. Manual downloads placed
+# directly at models/hunyuan3d/dit-v2-1 and models/hunyuan3d/vae-v2-1 are
+# detected and accepted as-is (no re-download).
+HUNYUAN3D_REPO = "tencent/Hunyuan3D-2.1"
+HUNYUAN3D_OFFICIAL_TO_CANONICAL = {
+    "hunyuan3d-dit-v2-1": "dit-v2-1",
+    "hunyuan3d-vae-v2-1": "vae-v2-1",
+}
+
+
+def fetch_hunyuan3d(force: bool) -> bool:
+    base = PROJECT_ROOT / "models" / "hunyuan3d"
+    marker = base / ".download_complete"
+    canonical_ckpt = base / "dit-v2-1" / "model.fp16.ckpt"
+
+    # Manual download already in canonical layout -> just mark complete.
+    if not force and canonical_ckpt.is_file():
+        marker.write_text(json.dumps({"repo_id": HUNYUAN3D_REPO, "source": "manual"}), encoding="utf-8")
+        print(f"  [ok] hunyuan3d: {canonical_ckpt} present (canonical layout)")
+        return True
+    if marker.is_file() and not force:
+        print(f"  [ok] hunyuan3d: {base} (marked complete)")
+        return True
+
+    print(f"  [..] hunyuan3d: snapshot_download({HUNYUAN3D_REPO}) -> {base}")
+    try:
+        from huggingface_hub import snapshot_download
+
+        snapshot_download(
+            repo_id=HUNYUAN3D_REPO,
+            local_dir=str(base),
+            allow_patterns=[
+                "hunyuan3d-dit-v2-1/config.yaml",
+                "hunyuan3d-dit-v2-1/model.fp16.ckpt",
+                "hunyuan3d-vae-v2-1/config.yaml",
+                "hunyuan3d-vae-v2-1/model.fp16.ckpt",
+                "LICENSE",
+            ],
+            token=os.environ.get("HF_TOKEN", None),
+        )
+    except Exception as exc:  # network / gated
+        print(f"  [!!] hunyuan3d: download failed: {exc}\n"
+              f"       If the repo is gated, set HF_TOKEN or run: huggingface-cli login")
+        return False
+
+    # Normalize official subfolder names -> canonical layout. On --force the
+    # canonical dir is stale, so replace it with the fresh download.
+    for official, canonical in HUNYUAN3D_OFFICIAL_TO_CANONICAL.items():
+        src = base / official
+        dst = base / canonical
+        if not src.is_dir():
+            continue
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.move(str(src), str(dst))
+
+    if canonical_ckpt.is_file():
+        marker.write_text(json.dumps({"repo_id": HUNYUAN3D_REPO, "source": "fetch"}), encoding="utf-8")
+        print(f"  [ok] hunyuan3d: {canonical_ckpt} ({canonical_ckpt.stat().st_size / 1e6:.0f} MB)")
+        return True
+    print(f"  [!!] hunyuan3d: dit-v2-1/model.fp16.ckpt not found after download")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Hunyuan3D-2mv (optional multi-view backend)
+# ---------------------------------------------------------------------------
+
+# Only the multi-view DiT is needed: it bundles its own VAE/conditioner, and
+# its fp16 checkpoint is 4.93 GB (1.1B params — fits 12 GB VRAM comfortably).
+HUNYUAN3D_MV_REPO = "tencent/Hunyuan3D-2mv"
+HUNYUAN3D_MV_OFFICIAL_TO_CANONICAL = {"hunyuan3d-dit-v2-mv": "dit-v2-mv"}
+
+
+def fetch_hunyuan3d_mv(force: bool) -> bool:
+    base = PROJECT_ROOT / "models" / "hunyuan3d-mv"
+    marker = base / ".download_complete"
+    canonical_ckpt = base / "dit-v2-mv" / "model.fp16.ckpt"
+
+    if not force and canonical_ckpt.is_file():
+        marker.write_text(json.dumps({"repo_id": HUNYUAN3D_MV_REPO, "source": "manual"}), encoding="utf-8")
+        print(f"  [ok] hunyuan3d_mv: {canonical_ckpt} present (canonical layout)")
+        return True
+    if marker.is_file() and not force:
+        print(f"  [ok] hunyuan3d_mv: {base} (marked complete)")
+        return True
+
+    print(f"  [..] hunyuan3d_mv: snapshot_download({HUNYUAN3D_MV_REPO}) -> {base}")
+    try:
+        from huggingface_hub import snapshot_download
+
+        snapshot_download(
+            repo_id=HUNYUAN3D_MV_REPO,
+            local_dir=str(base),
+            allow_patterns=[
+                "hunyuan3d-dit-v2-mv/config.yaml",
+                "hunyuan3d-dit-v2-mv/model.fp16.ckpt",
+            ],
+            token=os.environ.get("HF_TOKEN", None),
+        )
+    except Exception as exc:  # network / gated
+        print(f"  [!!] hunyuan3d_mv: download failed: {exc}")
+        return False
+
+    for official, canonical in HUNYUAN3D_MV_OFFICIAL_TO_CANONICAL.items():
+        src = base / official
+        dst = base / canonical
+        if not src.is_dir():
+            continue
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.move(str(src), str(dst))
+
+    if canonical_ckpt.is_file():
+        marker.write_text(json.dumps({"repo_id": HUNYUAN3D_MV_REPO, "source": "fetch"}), encoding="utf-8")
+        print(f"  [ok] hunyuan3d_mv: {canonical_ckpt} ({canonical_ckpt.stat().st_size / 1e6:.0f} MB)")
+        return True
+    print(f"  [!!] hunyuan3d_mv: dit-v2-mv/model.fp16.ckpt not found after download")
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -284,7 +420,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--force", action="store_true", help="Re-download even if present.")
     args = ap.parse_args(argv)
 
-    names = {e.name for e in HF_ENTRIES} | {e.name for e in URL_ENTRIES} | {"blender"}
+    names = {e.name for e in HF_ENTRIES} | {e.name for e in URL_ENTRIES} | {"blender", "hunyuan3d", "hunyuan3d_mv"}
     if args.only:
         wanted = {n.strip() for n in args.only.split(",") if n.strip()}
         unknown = wanted - names
@@ -298,6 +434,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     results: dict[str, bool] = {}
     if "blender" in wanted:
         results["blender"] = fetch_blender(args.force)
+    if "hunyuan3d" in wanted:
+        results["hunyuan3d"] = fetch_hunyuan3d(args.force)
+    if "hunyuan3d_mv" in wanted:
+        results["hunyuan3d_mv"] = fetch_hunyuan3d_mv(args.force)
     for entry in URL_ENTRIES:
         if entry.name in wanted:
             results[entry.name] = verify_url_artifact(entry, args.force)

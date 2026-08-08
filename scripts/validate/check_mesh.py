@@ -62,7 +62,10 @@ def validate_stl(cfg: Config, stl_path: Path) -> dict[str, Any]:
     # --- base flatness -----------------------------------------------------------
     z_min = float(mesh.vertices[:, 2].min())
     on_floor = int((np.abs(mesh.vertices[:, 2] - z_min) < 0.2).sum())
-    checks["base_flat"] = on_floor / max(len(mesh.vertices), 1) > 0.005
+    # Scale-independent: a real base rim (>= 4 verts, excludes a sphere's
+    # contact point) plus a small ratio — the old fixed 0.5% fails on
+    # detailed busts where the rim is a shrinking vertex fraction.
+    checks["base_flat"] = on_floor >= 4 and on_floor / max(len(mesh.vertices), 1) > 0.001
     checks["base_min_z_mm"] = round(z_min, 3)
 
     # --- triangle budget ----------------------------------------------------------

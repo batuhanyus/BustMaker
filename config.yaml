@@ -23,29 +23,50 @@ logging:
 
 # Quality presets. Values are per-preset overrides; every stage reads them
 # through Config.preset(name).
+#   generative_backends: ordered backend chain for the 'generative' strategy.
+#     balanced/high use Hunyuan3D-2.1 (best local quality, ~1-4 min);
+#     fast keeps TripoSR (preview-grade, ~seconds).
+#   octree_resolution: Hunyuan3D isosurface grid (256/384/512; VRAM scales up).
+#   gen_steps: Hunyuan3D flow-matching denoise steps.
 quality_presets:
   fast:
     gen_resolution: 512        # pixels, longest side for generative backends
     video_max_frames: 60       # max frames to keep after keyframe selection
     capture_max_images: 60     # max images fed to photogrammetry
     decimate_ratio: 0.08       # fraction of triangles kept for STL export
-    voxel_size_mm: 1.5         # Blender voxel remesh resolution
+    voxel_size_mm: 1.5         # Blender voxel remesh resolution (repair only)
+    min_triangles: 20000       # STL detail floor (never decimate below this)
+    max_triangles: 2000000     # slicer-friendly hard cap
+    generative_backends: [triposr, stable_fast_3d]
+    octree_resolution: 256
+    gen_steps: 50
   balanced:
     gen_resolution: 640
     video_max_frames: 120
     capture_max_images: 90
     decimate_ratio: 0.15
     voxel_size_mm: 1.2
+    min_triangles: 40000
+    max_triangles: 2000000
+    generative_backends: [hunyuan3d, stable_fast_3d, triposr]
+    octree_resolution: 384
+    gen_steps: 50
   high:
     gen_resolution: 1024
     video_max_frames: 240
     capture_max_images: 120
     decimate_ratio: 0.30
     voxel_size_mm: 0.9
+    min_triangles: 80000
+    max_triangles: 2000000
+    generative_backends: [hunyuan3d, stable_fast_3d, triposr]
+    octree_resolution: 512
+    gen_steps: 50
 
 # Mode -> ordered fallback chain of mesh-generation strategies.
 #   capture     : photogrammetry (COLMAP + Open3D Poisson), experimental
-#   generative  : single/multi-view image-to-mesh (TripoSR -> Stable Fast 3D)
+#   generative  : image-to-mesh; backend order is per-preset
+#                 (generative_backends above)
 #   depth_relief: bas-relief plaque from monocular depth (ultra-reliable)
 modes:
   auto:            [capture, generative, depth_relief]
@@ -54,8 +75,8 @@ modes:
   depth_relief:    [depth_relief]
 
 generative:
-  default_backend: triposr
-  fallback_backends: [stable_fast_3d]
+  default_backend: hunyuan3d   # per-preset chains live in quality_presets[*].generative_backends
+  fallback_backends: [stable_fast_3d, triposr]
   fp16: true
   low_vram: false              # stage-level flag; bumped automatically on OOM
   cpu_offload: false

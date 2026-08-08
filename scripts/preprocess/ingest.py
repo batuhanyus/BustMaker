@@ -78,7 +78,8 @@ def run_ingest(ctx: RunContext) -> StageResult:
             max_frames=max_frames * 3,
         )
         summary.source_frames = len(extracted)
-        selection = select_keyframes(extracted, max_frames, blur_thr, exp_range)
+        selection = select_keyframes(extracted, max_frames, blur_thr, exp_range,
+                                     estimate_yaws=len(extracted) > 1)
     elif itype == "images":
         imgs = _list_images(job.input_path)
         if not imgs:
@@ -90,7 +91,8 @@ def run_ingest(ctx: RunContext) -> StageResult:
             dst = job.temp_dir / "normalized" / f"photo_{i:05d}.jpg"
             _exif_normalize_copy(img, dst)
             normalized.append(dst)
-        selection = select_keyframes(normalized, max_frames, blur_thr, exp_range)
+        selection = select_keyframes(normalized, max_frames, blur_thr, exp_range,
+                                     estimate_yaws=len(normalized) > 1)
     else:  # single_image
         summary.source_frames = 1
         dst = job.temp_dir / "normalized" / "photo_00000.jpg"
@@ -145,9 +147,13 @@ def run_ingest(ctx: RunContext) -> StageResult:
 
     frames = sorted(job.preprocessed_dir.glob("frame_*.png"))
     summary.frames = frames
-    _write_metadata(job.preprocessed_dir / "metadata.json", summary, selection)
+    # yaw estimates aligned with ``frames`` order (accepted order) — used by
+    # multi-view generative backends (Hunyuan3D-2mv)
+    frame_yaws: list[Optional[float]] = [v.yaw for v in accepted]
+    _write_metadata(job.preprocessed_dir / "metadata.json", summary, selection, frame_yaws)
 
     ctx.set_shared("preprocessed_frames", frames)
+    ctx.set_shared("frame_yaws", frame_yaws)
     ctx.set_shared("input_type", itype)
     ctx.set_shared("ingest_summary", summary)
 
@@ -164,6 +170,7 @@ def run_ingest(ctx: RunContext) -> StageResult:
             "mask_failures": summary.mask_failures,
             "mask_quality_mean": summary.mask_quality_mean,
             "mask_quality_min": summary.mask_quality_min,
+            "frame_yaws": [y for y in frame_yaws if y is not None],
             "rejected": summary.rejected,
             "preprocessed_dir": str(job.preprocessed_dir),
         },
@@ -206,7 +213,8 @@ def _exif_normalize_copy(src: Path, dst: Path) -> None:
         img.save(dst, quality=95)  # re-encode; orientation baked in
 
 
-def _write_metadata(path: Path, summary: IngestSummary, selection) -> None:
+def _write_metadata(path: Path, summary: IngestSummary, selection, frame_yaws: Optional[list] = None) -> None:
+    yaws = frame_yaws or []
     payload = {
         "input_type": summary.input_type,
         "source_frames": summary.source_frames,
@@ -220,7 +228,12 @@ def _write_metadata(path: Path, summary: IngestSummary, selection) -> None:
         },
         "warnings": summary.warnings,
         "frames": [
-            {"index": i, "file": p.name, "masked": i < summary.masked_frames}
+            {
+                "index": i,
+                "file": p.name,
+                "masked": i < summary.masked_frames,
+                "yaw": yaws[i] if i < len(yaws) else None,
+            }
             for i, p in enumerate(summary.frames)
         ],
     }
