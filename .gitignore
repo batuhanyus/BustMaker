@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Downloaded / generated artifacts
+vendor/
+models/
+output/
+temp/
+logs/
+input/*  # keep input/.gitkeep only
+
+# Environment / secrets
+.env
+*.env.local
+
+.reasonix/

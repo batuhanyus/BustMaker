@@ -1,0 +1,109 @@
+# =============================================================================
+# Bust Forge — pipeline configuration
+# Local-only: video / photo folder / single image -> print-ready bust STL
+# =============================================================================
+
+paths:
+  input: ./input
+  output: ./output
+  temp: ./temp
+  logs: ./logs
+  models: ./models
+  vendor: ./vendor
+  # Where the portable Blender lives (expects <blender_dir>/blender.exe on
+  # Windows, <blender_dir>/blender on Linux/macOS). Null = auto-discover:
+  # config -> vendor/ffmpeg -> PATH.
+  blender_dir: ./vendor/blender
+  ffmpeg_path: null
+
+logging:
+  level: INFO        # DEBUG | INFO | WARNING | ERROR
+  console: true
+  file: true
+
+# Quality presets. Values are per-preset overrides; every stage reads them
+# through Config.preset(name).
+quality_presets:
+  fast:
+    gen_resolution: 512        # pixels, longest side for generative backends
+    video_max_frames: 60       # max frames to keep after keyframe selection
+    capture_max_images: 60     # max images fed to photogrammetry
+    decimate_ratio: 0.08       # fraction of triangles kept for STL export
+    voxel_size_mm: 1.5         # Blender voxel remesh resolution
+  balanced:
+    gen_resolution: 640
+    video_max_frames: 120
+    capture_max_images: 90
+    decimate_ratio: 0.15
+    voxel_size_mm: 1.2
+  high:
+    gen_resolution: 1024
+    video_max_frames: 240
+    capture_max_images: 120
+    decimate_ratio: 0.30
+    voxel_size_mm: 0.9
+
+# Mode -> ordered fallback chain of mesh-generation strategies.
+#   capture     : photogrammetry (COLMAP + Open3D Poisson), experimental
+#   generative  : single/multi-view image-to-mesh (TripoSR -> Stable Fast 3D)
+#   depth_relief: bas-relief plaque from monocular depth (ultra-reliable)
+modes:
+  auto:            [capture, generative, depth_relief]
+  generative:      [generative, depth_relief]
+  capture:         [capture, generative, depth_relief]
+  depth_relief:    [depth_relief]
+
+generative:
+  default_backend: triposr
+  fallback_backends: [stable_fast_3d]
+  fp16: true
+  low_vram: false              # stage-level flag; bumped automatically on OOM
+  cpu_offload: false
+  seed: 42
+  texture: false               # FDM printing needs geometry only — keep false
+
+capture:
+  backend: colmap_open3d       # COLMAP (vendor) -> Open3D Poisson reconstruction
+  gpu: true
+  # Minimum number of good views required before capture is attempted
+  min_views: 12
+
+depth:
+  backend: depth_anything_v2
+  model_size: small            # small | base | large
+  relief_depth_mm: 25.0        # max extrusion depth of the relief plaque
+
+background_removal:
+  backend: rembg
+  model: u2net                 # u2net | u2netp | isnet-general-use, ...
+  min_mask_quality: 0.5        # below this, frames are flagged in the report
+
+video:
+  extract_interval_sec: 1.0    # initial even sampling of the video
+  min_frame_width: 480         # upscale smaller frames before selection
+  blur_threshold: 60.0         # Laplacian variance; lower = more tolerant
+  exposure_ok_range: [25, 235] # mean-luma band considered correctly exposed
+
+print:
+  target_height_mm: 120.0      # default bust height
+  base_thickness_mm: 4.0
+  min_wall_thickness_mm: 1.5
+  max_build_volume_mm: [220, 220, 250]   # Ender 3 V2
+  stl_binary: true
+  stl_name: bust.stl
+  glb_name: preview.glb
+
+vr:
+  vram_limit_gb: 12            # RTX 4070
+  oom_retry_steps: [fp16, lowvram, cpu]  # progressive degradation ladder
+  batch_size: 1                # never raise unless explicitly safe
+
+report:
+  include_debug: false         # keep debug keyframes/masks in the job output
+
+slicing:
+  # Deferred by design: PROJECT.md forbids automatic G-code generation.
+  # Hook only — leave a place for PrusaSlicer CLI later without refactoring.
+  enabled: false
+  backend: prusaslicer
+  profile: ender3v2_pla

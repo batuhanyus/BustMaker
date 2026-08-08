@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bust-forge"
+version = "0.1.0"
+description = "Local-only pipeline: smartphone video/photos -> print-ready 3D bust STL"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+# Runtime dependencies are managed in requirements.txt (pinned by requirements.lock
+# after a verified install). Keeping them here would duplicate the pins.
+dependencies = []
+
+[tool.setuptools]
+py-modules = ["run_pipeline", "app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
