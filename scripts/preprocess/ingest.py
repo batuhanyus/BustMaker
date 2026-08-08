@@ -96,16 +96,17 @@ def run_ingest(ctx: RunContext) -> StageResult:
         dst = job.temp_dir / "normalized" / "photo_00000.jpg"
         _exif_normalize_copy(job.input_path, dst)
         selection = select_keyframes([dst], 1, blur_thr, exp_range)
-        if not selection.accepted:
-            # single image: accept anyway, with a warning (best effort input)
-            selection.accepted = selection.rejected
-            selection.rejected = []
-            summary.warnings.append("single image failed quality checks; proceeding anyway")
 
     accepted = selection.accepted
     summary.accepted_frames = len(accepted)
     summary.rejected = selection.summary()["rejected_reasons"]
     log.info("ingest: %d accepted / %d rejected", len(accepted), len(selection.rejected))
+
+    if accepted and any(v.reason.startswith("fallback_") for v in accepted):
+        summary.warnings.append(
+            f"all {summary.source_frames} source frames failed quality checks; "
+            f"proceeding with {len(accepted)} least-bad frames"
+        )
 
     if not accepted:
         raise RuntimeError("no usable frames after quality filtering")

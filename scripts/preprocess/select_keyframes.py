@@ -120,6 +120,12 @@ def select_keyframes(
     accepted = [v for v in verdicts if v.accepted]
     rejected = [v for v in verdicts if not v.accepted]
 
+    if rejected:
+        reasons = _reason_counts(rejected)
+        sharpness_vals = [v.sharpness for v in rejected]
+        log.info("quality rejects: %s | sharpness range [%.1f, %.1f]",
+                 reasons, min(sharpness_vals), max(sharpness_vals))
+
     if len(accepted) > max_frames:
         if order_by_quality:
             accepted.sort(key=lambda v: v.sharpness, reverse=True)
@@ -129,6 +135,24 @@ def select_keyframes(
             step = len(accepted) / max_frames
             accepted = [accepted[round(i * step)] for i in range(max_frames)]
         log.info("capped keyframes to %d (from %d good)", len(accepted), len(accepted) + len(rejected))
+
+    # Best-effort fallback: if every frame fails quality checks (e.g. phone
+    # video with motion blur where nothing reaches the threshold), keep the
+    # sharpest frames anyway so the run can proceed.
+    if not accepted:
+        usable = [v for v in verdicts if v.reason != "unreadable"]
+        if usable:
+            log.warning(
+                "all %d frames failed quality checks; falling back to %d sharpest",
+                len(verdicts), min(max_frames, len(usable)),
+            )
+            usable.sort(key=lambda v: v.sharpness, reverse=True)
+            accepted = usable[:max_frames]
+            for v in accepted:
+                v.accepted = True
+                v.reason = f"fallback_{v.reason}"
+            accepted.sort(key=lambda v: v.index)  # temporal order (COLMAP-friendly)
+            rejected = [v for v in verdicts if not v.accepted]
 
     if progress:
         progress("keyframe selection done", 1.0)
