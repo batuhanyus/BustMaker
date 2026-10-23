@@ -40,6 +40,8 @@ quality_presets:
     generative_backends: [triposr, stable_fast_3d]
     octree_resolution: 256
     gen_steps: 50
+    guidance_scale: 5.0
+    num_chunks: 8000
   balanced:
     gen_resolution: 640
     video_max_frames: 120
@@ -51,6 +53,8 @@ quality_presets:
     generative_backends: [hunyuan3d, stable_fast_3d, triposr]
     octree_resolution: 384
     gen_steps: 50
+    guidance_scale: 6.0
+    num_chunks: 12000
   high:
     gen_resolution: 1024
     video_max_frames: 240
@@ -62,6 +66,8 @@ quality_presets:
     generative_backends: [hunyuan3d, stable_fast_3d, triposr]
     octree_resolution: 512
     gen_steps: 50
+    guidance_scale: 7.0
+    num_chunks: 20000
 
 # Mode -> ordered fallback chain of mesh-generation strategies.
 #   capture     : photogrammetry (COLMAP + Open3D Poisson), experimental
@@ -73,6 +79,9 @@ modes:
   generative:      [generative, depth_relief]
   capture:         [capture, generative, depth_relief]
   depth_relief:    [depth_relief]
+  # Portrait uses the same backend chain but enables face-aware conditioning,
+  # hair-aware matting and detail-preserving print settings.
+  portrait:        [generative, depth_relief]
 
 generative:
   default_backend: hunyuan3d   # per-preset chains live in quality_presets[*].generative_backends
@@ -82,6 +91,49 @@ generative:
   cpu_offload: false
   seed: 42
   texture: false               # FDM printing needs geometry only — keep false
+
+
+# Portrait-specific path.  This deliberately stays inside the existing local
+# dependency envelope: better matting/cropping + Hunyuan controls now, while
+# leaving heavyweight research stacks (FaceLift/DECA/InstantID) optional rather
+# than silently adding incompatible Python/CUDA environments.
+portrait:
+  background_model: birefnet-portrait
+  background_fallback_model: u2net
+  generative_backends: [hunyuan3d, stable_fast_3d, triposr]
+  conditioning:
+    # Crop dimensions are expressed relative to detected face height.
+    face_widths: 1.80
+    above_face: 0.35
+    below_face: 0.45
+    subject_padding: 0.06
+    padding_fraction: 0.035
+    contrast: 1.06
+    sharpen: 1.20
+  hunyuan:
+    # Stronger image adherence than generic-object mode.  The official 2mv
+    # recipe uses octree~=380 and num_chunks=20000; more octree cells are not
+    # a substitute for better portrait conditioning.
+    guidance_scale: 7.5
+    num_chunks: 20000
+    multiview_steps: 30
+    multiview_octree_resolution: 380
+  print_overrides:
+    fast:
+      decimate_ratio: 0.55
+      min_triangles: 90000
+      max_triangles: 750000
+      voxel_size_mm: 0.8
+    balanced:
+      decimate_ratio: 0.70
+      min_triangles: 150000
+      max_triangles: 1000000
+      voxel_size_mm: 0.6
+    high:
+      decimate_ratio: 0.85
+      min_triangles: 250000
+      max_triangles: 1200000
+      voxel_size_mm: 0.45
 
 capture:
   backend: colmap_open3d       # COLMAP (vendor) -> Open3D Poisson reconstruction

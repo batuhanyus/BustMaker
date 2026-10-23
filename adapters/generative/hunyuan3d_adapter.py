@@ -108,13 +108,28 @@ def find_mv_subfolder(models_dir: Path) -> Optional[str]:
 
 
 def _select_multiview_views(ctx: RunContext, frames: list[Path]) -> Optional[dict[str, Path]]:
-    """Pick up to 4 viewpoint frames (front/left/back/right) for mv conditioning.
+    """Pick Hunyuan3D-2mv views with conservative semantic labelling.
 
-    Returns None when fewer than 2 distinct views are available or the mv
-    weights are missing — callers then use single-image conditioning.
+    Explicit user filenames (``front.*``, ``left.*``, ``back.*``, ``right.*``)
+    win because a back view has no face for a pose estimator to inspect.  When
+    those tags are absent we fall back to MediaPipe yaw labels.  We never invent
+    a back/side tag from temporal order for the 2mv conditioner: a wrong semantic
+    view hurts more than omitting it.
     """
     if len(frames) < 2:
         return None
+
+    explicit: list[Optional[str]] = ctx.shared("frame_view_tags", []) or []
+    if len(explicit) == len(frames):
+        views: dict[str, Path] = {}
+        for tag, frame in zip(explicit, frames):
+            if tag in {"front", "left", "back", "right"}:
+                views.setdefault(tag, frame)
+        if len(views) >= 2:
+            log.info("multiview input from filenames: %s",
+                     {k: v.name for k, v in views.items()})
+            return views
+
     from scripts.preprocess.select_keyframes import (  # noqa: PLC0415
         fill_yaws_by_temporal_interpolation,
         select_viewpoints,
@@ -124,18 +139,20 @@ def _select_multiview_views(ctx: RunContext, frames: list[Path]) -> Optional[dic
     if len(raw_yaws) != len(frames):
         raw_yaws = [None] * len(frames)
     filled = fill_yaws_by_temporal_interpolation(raw_yaws)
-    # yaw_guided_only: the mv model is sensitive to wrong view semantics, so
-    # never feed it views whose tags are temporal guesses.
-    selections = select_viewpoints(filled, max_views=min(4, len(frames)), yaw_guided_only=True)
+    selections = select_viewpoints(
+        filled, max_views=min(4, len(frames)), yaw_guided_only=True
+    )
     if len(selections) < 2:
         return None
-    views: dict[str, Path] = {}
+    views = {}
     for i, tag in selections:
-        views.setdefault(tag, frames[i])  # first frame per tag wins
+        views.setdefault(tag, frames[i])
     if len(views) < 2:
         return None
-    log.info("multiview input: %s", {k: v.name for k, v in views.items()})
+    log.info("multiview input from head yaw: %s",
+             {k: v.name for k, v in views.items()})
     return views
+
 
 
 class Hunyuan3DBackend(MeshBackend):
@@ -178,18 +195,34 @@ class Hunyuan3DBackend(MeshBackend):
 
         octree = int(preset.get("octree_resolution", 384))
         steps = int(preset.get("gen_steps", 50))
+        guidance_scale = float(preset.get("guidance_scale", gen_cfg.get("guidance_scale", 5.0)))
+        num_chunks = int(preset.get("num_chunks", gen_cfg.get("num_chunks", 8000)))
+        conditioning_resolution = int(preset.get("gen_resolution", 640))
         seed = int(gen_cfg.get("seed", 42))
 
+        if ctx.mode == "portrait":
+            guidance_scale = float(self.cfg.get("portrait.hunyuan.guidance_scale", guidance_scale))
+            num_chunks = int(self.cfg.get("portrait.hunyuan.num_chunks", num_chunks))
+            if views is not None:
+                steps = int(self.cfg.get("portrait.hunyuan.multiview_steps", steps))
+                octree = int(self.cfg.get(
+                    "portrait.hunyuan.multiview_octree_resolution", octree
+                ))
+
         for settings in oom_retry_ladder(self.cfg):
+            effective_chunks = 8000 if settings["low_vram"] else num_chunks
             log.info(
-                "hunyuan3d attempt: %s (device=%s, fp16=%s, octree=%d, steps=%d, %s)",
+                "hunyuan3d attempt: %s (device=%s, fp16=%s, octree=%d, steps=%d, "
+                "guidance=%.2f, chunks=%d, condition_px=%d, %s)",
                 settings["step"], settings["device"], settings["fp16"], octree, steps,
-                cond_desc,
+                guidance_scale, effective_chunks, conditioning_resolution, cond_desc,
             )
             try:
-                mesh = self._infer(cond, subfolder, mv_subfolder, models_dir,
-                                   octree, steps, seed, settings,
-                                   progress=self._progress_cb(ctx))
+                mesh = self._infer(
+                    cond, subfolder, mv_subfolder, models_dir,
+                    octree, steps, seed, settings, guidance_scale, effective_chunks,
+                    conditioning_resolution, progress=self._progress_cb(ctx),
+                )
             except Exception as exc:  # noqa: BLE001 - try next ladder rung
                 free_memory()
                 log.warning("hunyuan3d %s failed: %s", settings["step"], exc)
@@ -213,6 +246,9 @@ class Hunyuan3DBackend(MeshBackend):
                     "low_vram": settings["low_vram"],
                     "octree_resolution": octree,
                     "num_inference_steps": steps,
+                    "guidance_scale": guidance_scale,
+                    "num_chunks": effective_chunks,
+                    "conditioning_resolution": conditioning_resolution,
                     "subfolder": subfolder,
                     **cond_desc,
                     "vertices": int(len(mesh.vertices)),
@@ -239,6 +275,8 @@ class Hunyuan3DBackend(MeshBackend):
 
     def _infer(self, cond, subfolder: str, mv_subfolder: Optional[str], models_dir: Path,
                octree: int, steps: int, seed: int, settings: dict,
+               guidance_scale: float = 5.0, num_chunks: int = 8000,
+               conditioning_resolution: int = 640,
                progress: Optional[Callable[[str, float], None]] = None):
         """Load the pipeline and generate one mesh. Returns a trimesh.Trimesh.
 
@@ -282,8 +320,8 @@ class Hunyuan3DBackend(MeshBackend):
             pipeline.enable_model_cpu_offload()
 
         image = (
-            {tag: Image.open(p).convert("RGBA") for tag, p in cond.items()}
-            if multiview else Image.open(cond).convert("RGBA")
+            {tag: _load_condition_image(p, conditioning_resolution) for tag, p in cond.items()}
+            if multiview else _load_condition_image(cond, conditioning_resolution)
         )
         # Exactly `steps` callbacks fire (one per denoise iteration, i in 0..steps-1),
         # so counting calls is robust even if the scheduler order > 1 skews step_idx.
@@ -309,7 +347,9 @@ class Hunyuan3DBackend(MeshBackend):
         meshes = pipeline(
             image=image,
             num_inference_steps=steps,
+            guidance_scale=guidance_scale,
             octree_resolution=octree,
+            num_chunks=num_chunks,
             generator=torch.manual_seed(seed),
             output_type="trimesh",
             enable_pbar=False,   # progress is reported through `callback` instead
@@ -320,6 +360,26 @@ class Hunyuan3DBackend(MeshBackend):
         if isinstance(mesh, (list, tuple)):
             mesh = mesh[0] if mesh else None
         return mesh
+
+
+def _load_condition_image(path: Path, resolution: int) -> Image.Image:
+    """Load RGBA and make ``gen_resolution`` an actual conditioning control.
+
+    Hunyuan performs its own model-specific preprocessing afterwards, but
+    bounding the source raster here prevents a 4K photo and a 640 px photo from
+    taking two unrelated preprocessing paths and makes the preset visible in
+    reports/debug artefacts.  Aspect ratio and alpha are preserved.
+    """
+    with Image.open(path) as opened:
+        img = opened.convert("RGBA")
+    resolution = max(128, int(resolution))
+    longest = max(img.size)
+    if longest != resolution:
+        scale = resolution / max(1, longest)
+        size = (max(1, round(img.width * scale)), max(1, round(img.height * scale)))
+        img = img.resize(size, Image.Resampling.LANCZOS)
+    return img
+
 
 
 def _pick_best_frame(ctx: RunContext, frames: list[Path]) -> Optional[Path]:

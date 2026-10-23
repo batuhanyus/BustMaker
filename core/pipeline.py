@@ -26,7 +26,7 @@ from core.report import JobReport
 log = get_logger("pipeline")
 
 # Valid pipeline modes (must match config.yaml `modes:` keys).
-MODES = ("auto", "generative", "capture", "depth_relief")
+MODES = ("auto", "portrait", "generative", "capture", "depth_relief")
 
 
 class StageError(Exception):
@@ -110,6 +110,10 @@ def stage_print_prep(ctx: RunContext) -> StageResult:
         raise StageError(f"print_prep: raw mesh missing: {raw}")
 
     preset = ctx.cfg.preset(ctx.preset)
+    if ctx.mode == "portrait":
+        overrides = ctx.cfg.get(f"portrait.print_overrides.{ctx.preset}", {}) or {}
+        if isinstance(overrides, dict):
+            preset.update(overrides)
     print_cfg = ctx.cfg.print_cfg
     script_dir = ctx.cfg.path.parent / "scripts" / "blender"
     final_dir = ctx.job.final_dir
@@ -177,6 +181,12 @@ def stage_print_prep(ctx: RunContext) -> StageResult:
             "stats": stats,
             "input_watertight": not needs_repair,
             "target_height_mm": print_cfg.get("target_height_mm", 120.0),
+            "effective_print_settings": {
+                "voxel_size_mm": preset.get("voxel_size_mm"),
+                "decimate_ratio": preset.get("decimate_ratio"),
+                "min_triangles": preset.get("min_triangles"),
+                "max_triangles": preset.get("max_triangles"),
+            },
         },
     )
 

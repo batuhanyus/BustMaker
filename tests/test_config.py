@@ -23,6 +23,7 @@ def test_presets_exist_and_typed(cfg):
 def test_mode_chains(cfg):
     assert cfg.mode_chain("auto") == ["capture", "generative", "depth_relief"]
     assert cfg.mode_chain("depth_relief") == ["depth_relief"]
+    assert cfg.mode_chain("portrait") == ["generative", "depth_relief"]
     assert cfg.mode_chain("generative")[-1] == "depth_relief"  # always has fallback
     with pytest.raises(KeyError):
         cfg.mode_chain("nope")

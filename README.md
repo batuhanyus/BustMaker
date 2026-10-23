@@ -19,14 +19,14 @@ py -3.12 -m venv .venv
 .venv\Scripts\python -m pip install -U pip
 .venv\Scripts\python -m pip install -r requirements.txt
 
-:: 2. one-time dependency fetch (internet needed once; ~16 GB incl. Hunyuan3D)
+:: 2. one-time dependency fetch (internet needed once; ~17 GB incl. Hunyuan3D + portrait matting)
 .venv\Scripts\python scripts\setup\fetch_dependencies.py
 .venv\Scripts\python scripts\setup\fetch_dependencies.py --check
 
 :: 3. run
 .venv\Scripts\python run_pipeline.py --input input\subject_01.mp4 --output output\subject_01
 .venv\Scripts\python run_pipeline.py --input input\photos_folder --mode auto --preset high
-.venv\Scripts\python run_pipeline.py --input input\portrait.jpg --mode generative
+.venv\Scripts\python run_pipeline.py --input input\portrait.jpg --mode portrait --preset high
 
 :: or launch the GUI
 .venv\Scripts\python app.py
@@ -49,13 +49,41 @@ output/<subject>/
 | Mode | Strategy chain |
 |---|---|
 | `auto` (default) | capture → generative → depth relief |
+| `portrait` | portrait matting/crop → Hunyuan3D (2mv when labelled/matched views exist) → depth relief |
 | `generative` | per-preset backend chain (balanced/high: Hunyuan3D-2.1 → Stable Fast 3D → TripoSR; fast: TripoSR → Stable Fast 3D) |
 | `capture` | COLMAP (experimental) → generative → depth relief |
 | `depth_relief` | depth-relief plaque only (always works) |
 
 Presets: `fast` / `balanced` / `high` — control the generative backend chain, Hunyuan3D
-isosurface resolution (`octree_resolution` 256/384/512) and denoise steps (`gen_steps`),
-keyframe budget, and STL detail floors (`min_triangles` / `max_triangles`, see `config.yaml`).
+isosurface resolution (`octree_resolution`), denoise steps (`gen_steps`), guidance, mesh-extraction
+chunk budget, keyframe budget, and STL detail floors (`min_triangles` / `max_triangles`).
+
+### Portrait mode
+
+`--mode portrait` is the likeness-first path for a single head-and-shoulders photograph or a
+labelled multi-view photo folder. It adds four things the generic object path deliberately does not:
+
+- `birefnet-portrait` matting (with automatic u2net fallback) so hair boundaries survive preprocessing;
+- face-aware head/shoulders cropping at the preset's actual `gen_resolution`;
+- stronger Hunyuan image guidance plus explicit `num_chunks`; and
+- portrait print overrides that keep substantially more triangles and use a finer repair voxel size.
+
+For multi-view folders, name images with unambiguous tokens such as `front.jpg`, `left.jpg`,
+`back.jpg`, `right.jpg`. Those labels are passed directly to Hunyuan3D-2mv. Video still uses
+MediaPipe head-yaw labels and refuses to invent semantic views when the evidence is weak. A single
+portrait therefore stays single-view; portrait mode does not fabricate left/back/right cameras.
+
+For an existing installation, fetch the new portrait matte and optional multi-view model with:
+
+```bat
+.venv\Scripts\python scripts\setup\fetch_dependencies.py --only rembg_birefnet_portrait,hunyuan3d_mv
+```
+
+The project does **not** silently install FaceLift, DECA or InstantID into the main Python 3.12
+environment. FaceLift currently expects a separate research stack, DECA depends on FLAME assets
+and research-only model licensing, and InstantID adds SDXL/InsightFace weights. They remain useful
+future/reference-view providers, but the default portrait mode stays reproducible on the stated
+RTX 4070 / 32 GB target.
 
 ## Fallback behavior
 
@@ -117,7 +145,8 @@ automatic G-code generation).
 
 After `fetch_dependencies.py` completes, unplug the network: all models live in `models/`
 and Blender in `vendor/blender/`. `U2NET_HOME` (rembg) and local checkpoint dirs keep
-everything project-local.
+everything project-local. Portrait mode's BiRefNet ONNX file is fetched into the same
+`models/rembg/` directory, so it does not download anything during inference.
 
 ## Notes / known limitations
 

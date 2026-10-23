@@ -57,7 +57,7 @@ class Config:
             if name not in presets:
                 raise ValueError(f"config: missing quality preset '{name}'")
         modes = self.data.get("modes", {})
-        for name in ("auto", "generative", "capture", "depth_relief"):
+        for name in ("auto", "portrait", "generative", "capture", "depth_relief"):
             if name not in modes:
                 raise ValueError(f"config: missing mode '{name}'")
         for name, chain in modes.items():

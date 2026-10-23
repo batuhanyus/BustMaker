@@ -1,0 +1,21 @@
+BustMaker portrait-mode replacement files
+
+Copy these files over the matching paths in your existing checkout.
+New files:
+  scripts/preprocess/portrait_conditioning.py
+  tests/test_portrait_conditioning.py
+
+Changed/replacement files:
+  README.md
+  adapters/generative/hunyuan3d_adapter.py
+  config.yaml
+  core/config.py
+  core/pipeline.py
+  requirements.txt
+  run_pipeline.py
+  scripts/generate/generate_mesh.py
+  scripts/preprocess/ingest.py
+  scripts/preprocess/portrait_conditioning.py
+  scripts/setup/fetch_dependencies.py
+  tests/test_config.py
+  tests/test_portrait_conditioning.py

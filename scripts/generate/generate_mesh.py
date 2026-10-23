@@ -32,6 +32,10 @@ STRATEGY_BACKENDS = {
 
 def _generative_backends(ctx: RunContext) -> list[str]:
     preset = ctx.cfg.preset(ctx.preset)
+    if ctx.mode == "portrait":
+        backends = ctx.cfg.get("portrait.generative_backends", None)
+        if backends:
+            return [str(b) for b in backends]
     backends = preset.get("generative_backends")
     if backends:
         return [str(b) for b in backends]

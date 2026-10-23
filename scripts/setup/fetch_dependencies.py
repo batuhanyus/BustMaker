@@ -11,7 +11,7 @@ runs fully offline):
     Hunyuan3D-2.1 DiT + VAE weights     -> models/hunyuan3d/ (dit-v2-1, vae-v2-1)
     Hunyuan3D-2mv multi-view DiT       -> models/hunyuan3d-mv/ (optional: multi-view input)
     Depth Anything V2 (small) weights   -> models/depth_anything_v2/
-    rembg u2net ONNX model              -> models/rembg/
+    rembg u2net + BiRefNet portrait     -> models/rembg/
     mediapipe FaceLandmarker model      -> models/mediapipe/face_landmarker.task
 
 Usage::
@@ -62,6 +62,10 @@ BLENDER_SHA256_URL = (
 # rembg downloads u2net.onnx from its GitHub release into U2NET_HOME; the
 # adapter points U2NET_HOME at models/rembg/ so the pre-fetched file is used.
 REMBG_U2NET_URL = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx"
+REMBG_BIREFNET_PORTRAIT_URL = (
+    "https://github.com/danielgatis/rembg/releases/download/v0.0.0/"
+    "BiRefNet-portrait-epoch_150.onnx"
+)
 
 
 @dataclass
@@ -124,6 +128,12 @@ HF_ENTRIES: list[HfEntry] = [
 URL_ENTRIES: list[UrlEntry] = [
     UrlEntry("rembg_u2net", REMBG_U2NET_URL, "models/rembg/u2net.onnx", "rembg u2net background-removal model"),
     UrlEntry(
+        "rembg_birefnet_portrait",
+        REMBG_BIREFNET_PORTRAIT_URL,
+        "models/rembg/birefnet-portrait.onnx",
+        "rembg BiRefNet portrait model (hair-aware portrait matting)",
+    ),
+    UrlEntry(
         "mediapipe_face_landmarker",
         "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
         "models/mediapipe/face_landmarker.task",
@@ -142,6 +152,7 @@ CHECK_FILES: dict[str, Path] = {
     "stable_fast_3d": PROJECT_ROOT / "models/stable_fast_3d/model.safetensors",
     "depth_anything_v2": PROJECT_ROOT / "models/depth_anything_v2/model.safetensors",
     "rembg_u2net": PROJECT_ROOT / "models/rembg/u2net.onnx",
+    "rembg_birefnet_portrait": PROJECT_ROOT / "models/rembg/birefnet-portrait.onnx",
     "mediapipe_face_landmarker": PROJECT_ROOT / "models/mediapipe/face_landmarker.task",
 }
 

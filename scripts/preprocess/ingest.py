@@ -66,6 +66,7 @@ def run_ingest(ctx: RunContext) -> StageResult:
     exp_range = tuple(cfg.get("video.exposure_ok_range", [25, 235]))
 
     # ---- collect candidate frames -------------------------------------------
+    source_view_tags: list[Optional[str]] = []
     if itype == "video":
         info = probe(cfg, job.input_path)
         log.info("video %s: %.1fs, %.0f fps, %dx%d",
@@ -78,6 +79,7 @@ def run_ingest(ctx: RunContext) -> StageResult:
             max_frames=max_frames * 3,
         )
         summary.source_frames = len(extracted)
+        source_view_tags = [None] * len(extracted)
         selection = select_keyframes(extracted, max_frames, blur_thr, exp_range,
                                      estimate_yaws=len(extracted) > 1)
     elif itype == "images":
@@ -85,6 +87,7 @@ def run_ingest(ctx: RunContext) -> StageResult:
         if not imgs:
             raise RuntimeError(f"no images found in {job.input_path}")
         summary.source_frames = len(imgs)
+        source_view_tags = [_view_tag_from_name(img.stem) for img in imgs]
         # normalize orientation into temp (video frames need no EXIF handling)
         normalized = []
         for i, img in enumerate(imgs):
@@ -95,11 +98,16 @@ def run_ingest(ctx: RunContext) -> StageResult:
                                      estimate_yaws=len(normalized) > 1)
     else:  # single_image
         summary.source_frames = 1
+        source_view_tags = [_view_tag_from_name(job.input_path.stem)]
         dst = job.temp_dir / "normalized" / "photo_00000.jpg"
         _exif_normalize_copy(job.input_path, dst)
         selection = select_keyframes([dst], 1, blur_thr, exp_range)
 
     accepted = selection.accepted
+    frame_view_tags: list[Optional[str]] = [
+        source_view_tags[v.index] if 0 <= v.index < len(source_view_tags) else None
+        for v in accepted
+    ]
     summary.accepted_frames = len(accepted)
     summary.rejected = selection.summary()["rejected_reasons"]
     log.info("ingest: %d accepted / %d rejected", len(accepted), len(selection.rejected))
@@ -120,7 +128,13 @@ def run_ingest(ctx: RunContext) -> StageResult:
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError(f"rembg adapter unavailable: {exc}") from None
 
-    model = str(cfg.get("background_removal.model", "u2net"))
+    if ctx.mode == "portrait":
+        model = str(cfg.get("portrait.background_model", "birefnet-portrait"))
+        fallback_model = str(cfg.get("portrait.background_fallback_model",
+                                     cfg.get("background_removal.model", "u2net")))
+    else:
+        model = str(cfg.get("background_removal.model", "u2net"))
+        fallback_model = model
     keep_debug = bool(ctx.cli.get("debug") or cfg.get("report.include_debug", False))
     mask_dir = job.debug_dir / "masks" if keep_debug else None
     qualities: list[float] = []
@@ -132,6 +146,18 @@ def run_ingest(ctx: RunContext) -> StageResult:
             res = remove_background(cfg, verdict.path, out, model=model, mask_dir=mask_dir)
             qualities.append(res.quality)
         except Exception as exc:  # noqa: BLE001 - tolerate per-frame matting failure
+            # Portrait mode prefers BiRefNet's hair-aware matte but remains
+            # fully operational when only the legacy u2net model is present.
+            if fallback_model != model:
+                try:
+                    log.warning("matting model %s failed for %s (%s); retrying %s",
+                                model, verdict.path.name, exc, fallback_model)
+                    res = remove_background(
+                        cfg, verdict.path, out, model=fallback_model, mask_dir=mask_dir
+                    )
+                    qualities.append(res.quality)
+                except Exception as fallback_exc:  # noqa: BLE001
+                    exc = fallback_exc
             failures += 1
             log.warning("matting failed for %s: %s", verdict.path.name, exc)
             shutil.copy2(verdict.path, out)  # keep RGB, no alpha
@@ -146,6 +172,30 @@ def run_ingest(ctx: RunContext) -> StageResult:
         summary.warnings.append(f"{failures}/{len(accepted)} frames fell back to unmasked RGB")
 
     frames = sorted(job.preprocessed_dir.glob("frame_*.png"))
+
+    portrait_meta: list[dict] = []
+    if ctx.mode == "portrait":
+        # Hunyuan's image encoder should spend its pixels on the face/hair, not
+        # the studio background or a large torso.  Keep the ordinary matted
+        # frames above for debugging, and feed these face-aware crops downstream.
+        from scripts.preprocess.portrait_conditioning import prepare_portrait_condition
+
+        portrait_dir = job.preprocessed_dir / "portrait"
+        conditioned: list[Path] = []
+        resolution = int(preset.get("gen_resolution", 1024))
+        for i, frame in enumerate(frames):
+            out = portrait_dir / f"frame_{i:05d}.png"
+            res = prepare_portrait_condition(cfg, frame, out, resolution=resolution)
+            conditioned.append(out)
+            portrait_meta.append({
+                "file": str(out.relative_to(job.preprocessed_dir)),
+                "detector": res.detector,
+                "face_bbox": list(res.face_bbox) if res.face_bbox else None,
+                "crop_box": list(res.crop_box),
+                "output_size": list(res.output_size),
+            })
+        frames = conditioned
+
     summary.frames = frames
     # yaw estimates aligned with ``frames`` order (accepted order) — used by
     # multi-view generative backends (Hunyuan3D-2mv)
@@ -154,6 +204,7 @@ def run_ingest(ctx: RunContext) -> StageResult:
 
     ctx.set_shared("preprocessed_frames", frames)
     ctx.set_shared("frame_yaws", frame_yaws)
+    ctx.set_shared("frame_view_tags", frame_view_tags)
     ctx.set_shared("input_type", itype)
     ctx.set_shared("ingest_summary", summary)
 
@@ -171,8 +222,12 @@ def run_ingest(ctx: RunContext) -> StageResult:
             "mask_quality_mean": summary.mask_quality_mean,
             "mask_quality_min": summary.mask_quality_min,
             "frame_yaws": [y for y in frame_yaws if y is not None],
+            "frame_view_tags": frame_view_tags,
             "rejected": summary.rejected,
             "preprocessed_dir": str(job.preprocessed_dir),
+            "portrait_conditioning": portrait_meta if ctx.mode == "portrait" else None,
+            "background_model": model,
+            "background_fallback_model": fallback_model if fallback_model != model else None,
         },
     )
 
@@ -213,6 +268,26 @@ def _exif_normalize_copy(src: Path, dst: Path) -> None:
         img.save(dst, quality=95)  # re-encode; orientation baked in
 
 
+def _view_tag_from_name(stem: str) -> Optional[str]:
+    """Infer Hunyuan3D-2mv semantics from user-supplied filenames.
+
+    This makes folders named ``front.jpg``, ``left.png``, ``back.jpg`` and
+    ``right.jpg`` useful even when head-pose estimation cannot see a face in
+    the profile/back photographs.  Ambiguous names deliberately return None.
+    """
+    import re
+
+    tokens = {t for t in re.split(r"[^a-z0-9]+", stem.lower()) if t}
+    aliases = {
+        "front": {"front", "frontal", "centre", "center"},
+        "left": {"left", "lhs"},
+        "right": {"right", "rhs"},
+        "back": {"back", "rear"},
+    }
+    matches = [tag for tag, words in aliases.items() if tokens & words]
+    return matches[0] if len(matches) == 1 else None
+
+
 def _write_metadata(path: Path, summary: IngestSummary, selection, frame_yaws: Optional[list] = None) -> None:
     yaws = frame_yaws or []
     payload = {
@@ -230,7 +305,10 @@ def _write_metadata(path: Path, summary: IngestSummary, selection, frame_yaws: O
         "frames": [
             {
                 "index": i,
-                "file": p.name,
+                "file": (
+                    str(p.relative_to(path.parent))
+                    if p.is_relative_to(path.parent) else p.name
+                ),
                 "masked": i < summary.masked_frames,
                 "yaw": yaws[i] if i < len(yaws) else None,
             }

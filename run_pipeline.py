@@ -1,7 +1,7 @@
 """Bust Forge CLI entrypoint.
 
     python run_pipeline.py --input ./input/subject_01 [--output ...] \
-        [--mode auto|generative|capture|depth_relief] [--preset fast|balanced|high]
+        [--mode auto|portrait|generative|capture|depth_relief] [--preset fast|balanced|high]
 
 Runs the pipeline end-to-end and writes ``report.json`` into the job output
 directory. Exit code 0 = pipeline completed (success or graceful failure with
